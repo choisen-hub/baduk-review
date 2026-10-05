@@ -1,0 +1,15 @@
+# 환경·로그·산출물
+venv/
+__pycache__/
+*.log
+analysis_logs/
+# 복기 산출물(HTML·JSON)은 용량이 크고 기보 당사자 정보가 들어 있어 제외
+reviews/
+review/
+# 타인 기보·복기
+이서영_복기_*/
+run_leeseoyoung_*
+# KataGo 가중치·엔진
+*.bin.gz
+*.gz
+.DS_Store
