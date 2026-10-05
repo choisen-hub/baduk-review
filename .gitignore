@@ -7,8 +7,9 @@ analysis_logs/
 reviews/
 review/
 # 타인 기보·복기
-이서영_복기_*/
-run_leeseoyoung_*
+*_복기_*/
+run_*_all.sh
+run_*_sample.sh
 # KataGo 가중치·엔진
 *.bin.gz
 *.gz
