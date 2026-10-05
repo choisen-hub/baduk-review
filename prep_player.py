@@ -2,7 +2,7 @@
 """타 기사 기보(Lizzie 내보내기, PB/PW/RE 비어 있음)를 파일명에서 대국자·결과를 읽어
 메타를 채운 사본으로 baduk/<선수>/ 에 만든다. 원본은 건드리지 않는다.
 
-사용법: ./venv/bin/python prep_player.py --player 이서영 --src ~/Downloads [--only "2026.9.1"]
+사용법: ./venv/bin/python prep_player.py --player <이름> --src ~/Downloads [--only "2026.9.1"]
 파일명 규격: "YYYY.M.D-N 대회(시간) 흑 A 백 B 흑|백 불계승|N집승.sgf"
 """
 import argparse

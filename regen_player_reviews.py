@@ -2,7 +2,7 @@
 """analysis.json은 있으나 해설(review.json)이 없거나 깨진 리뷰 폴더의 Claude 해설만 다시 생성해 HTML을 다시 그린다.
 KataGo는 돌리지 않는다.
 
-사용법: ./venv/bin/python regen_player_reviews.py --reviews-dir reviews/이서영 --sgf-dir ../baduk/이서영 --player 이서영 --level pro [--force]
+사용법: ./venv/bin/python regen_player_reviews.py --reviews-dir reviews/<이름> --sgf-dir ../baduk/<이름> --player <이름> --level pro [--force]
 """
 import argparse
 import json
