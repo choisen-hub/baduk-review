@@ -1,91 +1,254 @@
-# baduk-review: KataGo + Claude 바둑 복기 앱
+# baduk-review
 
-SGF 기보를 넣으면 KataGo의 정량 분석 위에 Claude의 서사형 해설(총평, 스토리, 승부처, 잘 둔 수, 아쉬운 수, 배워갈 것)을 얹은 인터랙티브 HTML 리포트를 만든다.
+baduk-review is a command-line tool that turns a Go (baduk) game record in SGF format into an interactive HTML review. KataGo's analysis engine supplies the numbers (winrate and score lead for every position, best moves, principal variations, ownership), and a Claude model turns those numbers into a narrative commentary: an overall assessment, a phase-by-phase story, the turning points, the good moves, the mistakes, and the lessons to take away. A second tool aggregates many reviewed games into a training dashboard with generated exercises, and a small local server lets you try your own variations inside a report and have KataGo grade them.
 
-## 사용법
+It is written for a Go player who wants to review their own games, or for a teacher reviewing a student's games. The generated reports and the commentary are in Korean.
+
+The Korean version of this document is in `README.ko.md`.
+
+## Features
+
+Per-game review (`review.py`, invoked through the `./review` wrapper)
+
+- Parses the SGF main line with `sgfmill` (players, komi, result, date, handicap stones).
+- Sends the whole game to the KataGo analysis engine in one query (Korean rules, ownership included) and reads back one result per position. Default 400 visits per position; `--fast` uses 100; `--visits N` sets any value.
+- Grades every move from the change in score lead and winrate (thresholds in `lib/analysis.py`):
+  - 대악수 (blunder): loses 6 or more points, or 15 or more winrate percentage points
+  - 실수 (mistake): 3 points or 8 percentage points
+  - 완착 (slack move): 1.5 points or 4 percentage points
+  - 호착 (good move): matches KataGo's top choice, or loses at most 0.3 points
+  - 보통 (ordinary) otherwise
+- Picks turning points: the largest winrate swings of at least 6 percentage points plus any move where the lead changed hands, at most 8 in total.
+- Computes verified shape facts for each key move (`lib/tactics.py`): line number, connection versus cut (checked against actual group structure), attachment, hane, descent, extension, one-point and knight's jumps, captures and ataris, liberties after the move, and the life-and-death stability of nearby groups taken from KataGo ownership. These facts are injected into the prompt so the language model cannot describe a connection as a cut or claim a settled group was "saved".
+- Builds a prompt with the full move list, a winrate trajectory, candidate turning points with ASCII board diagrams, candidate good and bad moves, and strict writing rules, then calls Claude through the `claude` CLI and parses the JSON reply (`lib/llm.py`). Up to three retries on malformed output.
+- Two tones: `--level amateur` (default) explains principles; `--level pro` assumes a professional reader, forbids coordinates and raw numbers in prose, forbids life-and-death assertions, and restricts the good-move and mistake candidates to competitive positions (Black winrate between 10 and 90 percent before the move).
+- `--player b|w` tells the commentary whose perspective to take. `--no-llm` produces a data-only report. `--reviews-dir` chooses the output folder. `--model` overrides the Claude model. `--no-open` suppresses opening the report in the browser.
+- Writes `analysis.json`, `prompt.txt`, `review.json`, and `report.html` into `reviews/<sgf name>/`.
+
+The HTML report (`lib/render.py`)
+
+- Interactive board with a move slider, buttons, and left and right arrow keys.
+- Winrate and score-lead chart with hover tooltips; clicking the chart jumps to that move.
+- Colored move markers: good (green), slack (yellow), mistake (orange), blunder (red); clicking a marker jumps to the move.
+- Turning-point cards with a button that replays KataGo's recommended variation on the board with numbered overlays.
+- Collapsed table of the raw per-move evaluation.
+- A review mode where you click on the board to play your own variation, undo and redo one move at a time (buttons or arrow keys), and press "Ask AI" to have the local evaluation server grade each move of the variation and show the resulting position and continuation.
+- Automatic light and dark themes.
+
+Aggregate training report (`overall.py`)
+
+- Collects every reviewed game whose folder name carries a `(<player> 백)` or `(<player> 흑)` tag, so the tool knows which color the student played. Games without the tag are listed as skipped.
+- Separates official games from sparring games by keywords in the folder name (`SPARRING_KEYWORDS`).
+- Aggregates grade distribution, losses by game phase and by board region, counting only competitive positions, and splits mistakes into "missed the big point" (best move 5 or more lines away) versus "local reading error".
+- Extracts reading problems from positions where the student lost points, re-analyzes each chosen position more deeply (`DEEP_VISITS = 1500`), and for the losing side proposes a "fighting move" candidate that keeps winrate within 6 points of the best move but has a much larger score variance.
+- Builds positional-judgment exercises at 35, 55, 75 and 90 percent of each game with KataGo ownership maps for scoring.
+- Detects life-and-death problems (`lib/lifedeath.py`) by comparing ownership before and after large losses and looking for groups of 3 or more stones whose stability flipped.
+- Asks Claude for a short explanation of each problem and for an overall diagnosis (strengths, recurring patterns, practice plan, checklist).
+- Caches everything in `_종합캐시.json` so `--render-only` can redraw the HTML without calling KataGo or Claude. Output is `reviews/종합 리포트.html` (or `종합 리포트 (<player>).html` for a non-default player).
+
+Variation evaluation server (`ask_server.py`, invoked through `./ask`)
+
+- A `ThreadingHTTPServer` on `127.0.0.1:8791` with `POST /eval` and `GET /ping`, CORS enabled so a report opened from the file system can reach it.
+- Keeps one KataGo analysis engine process alive and serializes queries with a lock; queries take seconds instead of the engine's start-up time.
+- Shuts itself down after 45 minutes without a query (`--idle 0` disables this). Variations are capped at 60 moves and 1000 visits per query.
+
+Helper scripts
+
+- `prep_player.py`: takes SGF files exported without player metadata, reads date, event, players and result from a filename of the form `YYYY.M.D-N event 흑 A 백 B 흑|백 불계승|N집승.sgf`, writes copies with `DT`, `EV`, `PB`, `PW`, `RE` injected into the root node, and names them with the `(<player> 색, 결과)` tag the other tools expect. Originals are untouched.
+- `regen_player_reviews.py`: regenerates only the Claude commentary (and the HTML) for review folders whose `review.json` is missing or broken, without re-running KataGo.
+- `rerender_html.py`: redraws every `report.html` from existing `analysis.json` and `review.json`; useful after editing `lib/render.py`.
+- `regen_reviews.py`: an older ad hoc script with a hard-coded game list, kept for reference.
+
+## How it works
+
+```
+SGF file
+  |
+  v
+lib/analysis.parse_sgf          main line only, metadata, handicap stones
+  |
+  v
+lib/analysis.run_katago         one JSON query to `katago analysis`, one response per turn
+  |
+  v
+lib/analysis.classify           per-move loss, grade, turning points, good/bad candidates
+lib/analysis.restrict_to_competitive   (pro level only)
+  |
+  v
+lib/tactics.enrich_analysis     verified shape facts from board geometry + ownership
+  |                              -> analysis.json
+  v
+lib/llm.build_prompt            Korean prompt with rules and JSON schema -> prompt.txt
+lib/llm.call_claude             `claude -p --model <model> --tools "" ...`  -> review.json
+  |
+  v
+lib/render.render               single self-contained HTML -> report.html
+```
+
+`overall.py` reads the `analysis.json` and `review.json` files of many games, runs extra KataGo queries for deep re-analysis and ownership maps, calls Claude for problem explanations and a synthesis, and renders through `lib/overall_render.py`.
+
+`ask_server.py` is independent of the review pipeline: the report's JavaScript posts the starting position and the moves you played, and the server returns per-turn winrate, score lead, best move, principal variation and the top three candidates.
+
+Two conventions matter throughout the code:
+
+- All winrates and score leads are from Black's point of view. This relies on `reportAnalysisWinratesAs = BLACK` in `analysis.cfg`. Changing that setting silently breaks every grade.
+- The analysis engine may drop an in-flight query if stdin is closed, so `run_katago` keeps stdin open until all turns have been received.
+
+## Requirements
+
+- macOS is assumed: the wrapper scripts are zsh, reports are opened with `open`, and the author runs KataGo from Homebrew with the Metal backend. The Python code itself is portable, but the paths and the `open` calls would need adjusting elsewhere.
+- Python 3.9 or later with `sgfmill`.
+- KataGo (`katago` on `PATH`) and a network file. The path to the network is the `KATAGO_MODEL` constant in `lib/analysis.py`; the default points to a Homebrew install of `kata1-b18c384nbt`.
+- Claude Code CLI (`claude`) installed and logged in. Commentary is generated with `claude -p`, not with a direct API call, so no API key is read by this project. Whatever authentication the CLI uses applies.
+
+## Installation and running
 
 ```bash
-cd "~/Desktop/7 예술/baduk-review"
-./review "기보.sgf"                      # 기본: 400 visits + Claude 해설, 끝나면 브라우저 자동 오픈
-./review "기보.sgf" --player w           # 복기 주인공이 백일 때 (해설 관점이 백 중심)
-./review "기보.sgf" --visits 800         # 더 깊은 분석
-./review "기보.sgf" --fast               # 100 visits 빠른 분석
-./review "기보.sgf" --no-llm             # KataGo 데이터만, Claude 호출 생략
-./review "기보.sgf" --model claude-fable-5   # 해설 모델 변경 (기본 claude-sonnet-5 고정)
+git clone https://github.com/choisen-hub/baduk-review.git
+cd baduk-review
+
+# KataGo and a network (example for Homebrew on macOS)
+brew install katago
+# place a network file and point KATAGO_MODEL in lib/analysis.py at it
+
+# Python environment
+python3 -m venv venv
+./venv/bin/pip install sgfmill
+
+# Review one game (opens reviews/<name>/report.html when done)
+./review path/to/game.sgf
 ```
 
-산출물: `reviews/<기보이름>/report.html` (+ analysis.json, review.json, prompt.txt)
+Make sure `claude` works from the shell (`claude -p "ping" --model claude-sonnet-5`) before running with commentary enabled, or pass `--no-llm`.
 
-## 종합 리포트 (훈련장)
+## Configuration
+
+| Where | Setting | Meaning |
+| --- | --- | --- |
+| `analysis.cfg` | `reportAnalysisWinratesAs = BLACK` | Required. All classification assumes Black-relative values. |
+| `analysis.cfg` | `maxVisits`, `numAnalysisThreads`, `numSearchThreadsPerAnalysisThread`, `nnMaxBatchSize` | KataGo search and hardware settings; tune for your machine. |
+| `analysis.cfg` | `logDir = analysis_logs` | KataGo writes a log per run here (gitignored). |
+| `lib/analysis.py` | `KATAGO_MODEL` | Absolute path to the network file. |
+| `lib/analysis.py` | `ANALYSIS_CFG` | Path to `analysis.cfg` (defaults to the repo copy). |
+| `lib/llm.py` | `DEFAULT_MODEL = "claude-sonnet-5"` | Model passed to `claude -p`. Override per run with `--model`. The model is always passed explicitly. |
+| `lib/llm.py` | `call_claude` | Runs `claude -p --tools "" --setting-sources "" --no-session-persistence` with a JSON-only system prompt and strips `CLAUDECODE*` environment variables so a nested Claude Code session cannot turn the call into an agent run. |
+| `overall.py` | `DEEP_VISITS = 1500` | Visits for the deep re-analysis of training positions; 0 skips it. |
+| `overall.py` | `SPARRING_KEYWORDS` | Folder-name keywords that mark a game as sparring rather than official. |
+| `overall.py` | `SGF_DIR = ROOT.parent / "baduk"` | Default location of the SGF files, a sibling folder named `baduk`; override with `--sgf-dir`. |
+| `overall.py`, `regen_player_reviews.py` | `--player` | The name tag in review folder names. `overall.py` defaults to the author's own tag (`승호`); pass your own. |
+| `ask_server.py` | `--port 8791`, `--visits 200`, `--idle 45` | Server port, default visits per query, idle minutes before shutdown. |
+
+No environment variables are read by this project. If you authenticate the `claude` CLI with an API key, set `ANTHROPIC_API_KEY=<your key>` in the shell where you run the scripts; this project never stores it.
+
+## Project structure
+
+```
+baduk-review/
+  review              zsh wrapper: runs review.py with the venv interpreter
+  review.py           CLI entry point for a single-game review
+  ask                 zsh wrapper: runs ask_server.py with the venv interpreter
+  ask_server.py       local KataGo evaluation server for in-report variations
+  overall.py          aggregate training report across reviewed games
+  prep_player.py      inject metadata into SGF files named by a filename convention
+  regen_player_reviews.py   regenerate missing or broken commentary without KataGo
+  rerender_html.py    redraw all report.html files from cached JSON
+  regen_reviews.py    older ad hoc regeneration script (hard-coded list)
+  analysis.cfg        KataGo analysis engine configuration
+  lib/
+    analysis.py       SGF parsing, KataGo driver, move grading, competitive filter
+    tactics.py        geometric shape facts and group stability for the prompt
+    lifedeath.py      life-and-death problem detection from ownership flips
+    llm.py            prompt construction and `claude -p` call
+    render.py         single-game HTML report template and renderer
+    overall_render.py aggregate report template (dashboard, diagnosis, exercises)
+  reviews/            generated output, one folder per game (gitignored)
+  analysis_logs/      KataGo logs (gitignored)
+  venv/               Python virtual environment (gitignored)
+  LICENSE
+  README.md           this file
+  README.ko.md        Korean version
+```
+
+## Usage examples
+
+Single game, default settings (400 visits, Claude commentary, opens in browser):
 
 ```bash
-./venv/bin/python overall.py        # reviews/ 전체 집계 → reviews/종합 리포트.html
+./review "260812 club game.sgf"
 ```
 
-- 분석 완료된 대국 중 폴더명에 "(승호 백)" / "(승호 흑)" 표기가 있는 판만 집계 대상
-- 전적 대시보드(등급 분포·단계별·지역별 손실), Claude 종합 진단(강점·반복 패턴·연습 플랜·체크리스트)
-- 훈련 문제집: 실전에서 3집 이상 잃은 장면을 문제로 출제 (판당 최대 6개), 판을 클릭해 답하면 KataGo 후보 순위 기준으로 채점, 최선수·실전수·추천 변화 표시
-- 새 대국을 ./review 로 분석한 뒤 overall.py를 다시 돌리면 자동 반영
-
-## 검토 변화도 AI 평가 (./ask)
-
-리포트에서 판을 클릭해 직접 변화를 놓아본 뒤 "AI에게 묻기" 버튼을 누르면, KataGo가 그 변화의
-각 수 손실(등급), 최종 형세, 이후 추천 진행을 계산해 판 아래에 보여준다. 이 기능은 로컬 평가
-서버가 켜져 있어야 동작한다:
+The student played White, deeper search, no browser:
 
 ```bash
-cd "~/Desktop/7 예술/바둑/baduk-review"
-./ask                      # KataGo 상주 서버 (포트 8791, 45분 무사용 시 자동 종료)
-./ask --visits 400         # 더 깊은 평가 (기본 200, 질의당 수초~수십초)
+./review "game.sgf" --player w --visits 800 --no-open
 ```
 
-검토 중에는 "한 수 무르기 / 다시 진행" 버튼(또는 좌우 방향키)으로 변화 수순을 한 수씩
-되돌리고 다시 진행할 수 있다. 새 수를 두면 그 지점부터의 되돌리기 기록은 지워진다.
+Data-only report without any Claude call:
 
-## 리포트 기능
-
-- 인터랙티브 바둑판: 슬라이더/버튼/좌우 방향키로 수순 재생
-- 승률·집차이 그래프(토글): 호버 툴팁, 클릭하면 해당 장면으로 점프
-- 실착 마커: 호착(초록)/완착(노랑)/실수(주황)/대악수(빨강), 클릭 점프
-- 승부처 카드: "변화도 재생" 버튼으로 KataGo 추천 수순을 판 위에 번호로 오버레이
-- 전체 수 평가 원자료 표 (접힘)
-- 라이트/다크 모드 자동
-
-## 구조
-
-```
-review.py        # CLI 진입점 (venv 파이썬으로 실행하는 ./review 래퍼 사용)
-lib/analysis.py  # SGF 파싱(sgfmill) + KataGo analysis engine 구동 + 수 분류
-lib/llm.py       # 프롬프트 구성 + claude -p 호출 (모델 명시 고정)
-lib/render.py    # 단일 HTML 리포트 렌더링
-analysis.cfg     # KataGo 설정 (reportAnalysisWinratesAs = BLACK 이 전제)
+```bash
+./review "game.sgf" --no-llm
 ```
 
-## 전제 조건
+Professional-level tone, output under a per-player folder:
 
-- `katago` (brew, Metal 백엔드) + 모델 `kata1-b18c384nbt` (경로는 lib/analysis.py 상수)
-- `claude` CLI 로그인 상태
-- venv: `python3 -m venv venv && ./venv/bin/pip install sgfmill`
+```bash
+./review "../baduk/alice/260917 league vs bob (alice 백, 불계패).sgf" \
+  --player w --level pro --reviews-dir reviews/alice --no-open
+```
 
-## 수 등급 기준 (lib/analysis.py classify)
+Aggregate report for every game tagged `(alice 백)` or `(alice 흑)`:
 
-- 대악수: 6집 이상 손실 또는 승률 15%p 이상 하락
-- 실수: 3집 / 8%p
-- 완착: 1.5집 / 4%p
-- 호착: KataGo 1순위 일치 또는 손실 0.3집 이하
-- 승부처: 승률 변동 6%p 이상 상위 + 우세가 뒤바뀐 수 (최대 8개)
+```bash
+./venv/bin/python overall.py --player alice --level pro \
+  --reviews-dir reviews/alice --sgf-dir ../baduk/alice
+# later, after editing the template only:
+./venv/bin/python overall.py --player alice --reviews-dir reviews/alice --render-only
+```
 
-## 해설 정확도 장치 (lib/tactics.py)
+Prepare exported SGF files whose root node lacks player names and result:
 
-해설 LLM이 수의 기능을 오독하는 것(이음을 끊음으로, 산 돌을 구하는 수로)을 막기 위해,
-핵심 수마다 코드로 검증한 형태 사실을 계산해 프롬프트에 주입한다.
+```bash
+./venv/bin/python prep_player.py --player alice --src ~/Downloads --dry
+./venv/bin/python prep_player.py --player alice --src ~/Downloads
+```
 
-- 기하 규칙: 몇 선, 이음/끊음(실제로 상대 무리를 가르는지 그룹 판정)/붙임/젖힘/내려섬/뻗음/한칸/날일자 등, 따냄·단수, 착수 후 활로
-- KataGo ownership: 착수 전 주변 아군·적군 무리의 생사 안정도("사실상 확정(생존)" 무리에 "살리는 수" 서술 금지)
-- llm.py 작성 규칙: 전술 용어는 형태 정보와 일치할 때만 사용, 승률 %는 항상 흑 기준(색 반전 서술 금지)
+Start the variation server, then open any `report.html`, play a variation on the board, and press "Ask AI":
 
-## 주의
+```bash
+./ask --visits 400
+```
 
-- KataGo analysis engine은 stdin이 닫히면 진행 중 쿼리를 버릴 수 있어, 결과 수신 완료까지 stdin을 열어 둔다 (lib/analysis.py run_katago)
-- 승률/집차이는 전부 흑 기준. analysis.cfg의 reportAnalysisWinratesAs를 바꾸면 분류가 전부 틀어진다
-- SGF의 본선(main line)만 분석한다. Sabaki 변화도가 있는 파일도 본선만 읽음
+Regenerate commentary for folders that have `analysis.json` but no usable `review.json`:
+
+```bash
+./venv/bin/python regen_player_reviews.py --reviews-dir reviews/alice \
+  --sgf-dir ../baduk/alice --player alice --level pro
+```
+
+Redraw every report after a change to `lib/render.py`:
+
+```bash
+./venv/bin/python rerender_html.py
+```
+
+## Data, licensing and attribution
+
+- KataGo (https://github.com/lightvector/KataGo) is a separate program under its own MIT license. Network weights are downloaded separately from the KataGo project; check their terms before redistributing. Neither the binary nor any network file is included in this repository.
+- `sgfmill` (https://mjw.woodcraft.me.uk/sgfmill/) is used for SGF parsing and board replay.
+- Commentary is produced by a Claude model through the Claude Code CLI and may be wrong. The shape facts and prompt rules reduce, but do not eliminate, misreadings of a position.
+- The `reviews/` folder, the SGF folder, and any `*_복기_*` folders are gitignored because game records and reports identify the players. Do not commit other people's games without their consent.
+- Grade thresholds, turning-point rules, the competitive-position filter and the fighting-move heuristic were tuned by hand from feedback on real reviews; they are not derived from any published standard.
+
+## Known limitations and roadmap
+
+- Only the SGF main line is analyzed; variations stored in the file are ignored.
+- All prompts, reports and UI strings are in Korean. There is no language switch.
+- `KATAGO_MODEL` is a hard-coded absolute path and the scripts call `open`, so running on Linux or Windows requires small edits.
+- Ownership-based stability and liberty counts at 400 visits are sometimes wrong in tactical positions; the pro-level prompt already tells the model not to cite them, but the amateur-level prompt still exposes them.
+- The report's "Ask AI" button only works while `./ask` is running on the same machine.
+- The `--player` tag convention (folder name must contain `(<name> 백)` or `(<name> 흑)`) is the only way the aggregate report learns the student's color.
+- `regen_reviews.py` contains a hard-coded list of games from an early session and is not maintained.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
